@@ -27,6 +27,33 @@
  *
  */
 
+#if defined(VT100_SIXEL)
+struct sixelinfo {
+	enum {
+		DECSIXEL_INIT = 0,
+		DECSIXEL_RASTER_PAD,
+		DECSIXEL_RASTER_PH,
+		DECSIXEL_RASTER_PV,
+		DECSIXEL_REPEAT = '!',
+		DECSIXEL_RASTER = '\"',
+		DECSIXEL_COLOR = '#',
+	} decsixel_state;
+	int     decsixel_ph;
+	int     decsixel_x;
+	int     decsixel_y;
+	int		decsixel_repcount;
+	int     decsixel_color;
+	int     decsixel_ormode;
+
+	long    attr;			/* allocattr out value */
+	int     attrflags;		/* allocattr in value */
+	int     savedflags;		/* save for cursor flag */
+	int     maxwidth;
+	int     fontwidth;
+	int     fontheight;
+};
+#endif
+
 #define	VT100_EMUL_NARGS	10	/* max # of args to a command */
 
 struct wsemul_vt100_emuldata {
@@ -98,6 +125,13 @@ struct wsemul_vt100_emuldata {
 	u_char translatebuf[4];
 #else
 	u_char translatebuf[1];
+#endif
+#if defined(VT100_SIXEL)
+#define DCSTYPE_SIXEL	2
+	struct sixelinfo sixel;
+#endif
+#if defined(VT100_EUC)
+	u_char euc0;
 #endif
 };
 

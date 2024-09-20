@@ -148,6 +148,10 @@ wsemul_vt100_init(struct wsemul_vt100_emuldata *edp,
 	edp->ccol = ccol;
 	edp->defattr = defattr;
 	wsemul_reset_abortstate(&edp->abortstate);
+#if defined(VT100_SIXEL)
+	edp->sixel.fontwidth = type->fontwidth;
+	edp->sixel.fontheight = type->fontheight;
+#endif
 }
 
 void *
@@ -354,6 +358,49 @@ wsemul_vt100_output_normal(struct wsemul_vt100_emuldata *edp,
 	int oldsschartab = edp->sschartab;
 	int rc = 0;
 
+#if defined(VT100_EUC)
+	if (c & 0x80) {
+		if (edp->euc0) {
+			int w;
+			dc = ((u_int)edp->euc0 << 8) | c;
+			if (edp->euc0 == 0x8e) {
+				// halfwidth KANA
+				w = 1;
+			} else {
+				// fullwidth KANJI
+				w = 2;
+			}
+			edp->euc0 = 0;
+
+			if (COLS_LEFT(vd) < w) {
+				wsemul_vt100_nextline(edp);
+				vd->ccol = 0;
+				vd->flags &= ~VTFL_LASTCHAR;
+			}
+			if ((vd->flags & VTFL_INSERTMODE)
+			 && COLS_LEFT(vd) - w + 1 > 0) {
+				COPYCOLS(vd, vd->ccol, vd->ccol + w,
+				  COLS_LEFT(vd) - w + 1);
+			}
+
+			(*vd->emulops->putchar)(vd->emulcookie, vd->crow,
+				 vd->ccol << vd->dw, dc,
+				 kernel ? edp->kernattr : vd->curattr);
+
+			if (COLS_LEFT(vd) >= w)
+				vd->ccol += w;
+			else
+				vd->flags |= VTFL_LASTCHAR;
+			return;
+		} else {
+			edp->euc0 = c;
+			return;
+		}
+	} else {
+		edp->euc0 = 0;
+	}
+#endif
+
 	if ((edp->flags & (VTFL_LASTCHAR | VTFL_DECAWM)) ==
 	    (VTFL_LASTCHAR | VTFL_DECAWM)) {
 		rc = wsemul_vt100_nextline(edp);
@@ -483,9 +530,26 @@ wsemul_vt100_output_c0c1(struct wsemul_vt100_emuldata *edp,
 			edp->state = VT100_EMUL_STATE_ESC;
 		}
 		break;
+#if defined(VT100_SIXEL)
+	case 24:	/* CAN */
+	case 26:	/* SUB */
+		if (edp->state == VT100_EMUL_STATE_DCS && vd->dcstype == DCSTYPE_SIXEL) {
+			struct sixelinfo *sixel = &edp->sixel;
+			if (sixel->decsixel_x != 0 || sixel->decsixel_y != 0) {
+				// XXX あったほうがいいのかなと。
+				wsemul_vt100_nextline(edp);
+			}
+			if (sixel->savedflags) {
+				vd->flags |= sixel->savedflags;
+				sixel->savedflags = 0;
+			}
+			vd->dcstype = 0;
+		}
+#else
 	case ASCII_CAN:
 	case ASCII_SUB:
 		/* cancel current escape sequence */
+#endif
 		edp->state = VT100_EMUL_STATE_NORMAL;
 		break;
 	case ASCII_LF:
@@ -826,6 +890,173 @@ int
 wsemul_vt100_output_string(struct wsemul_vt100_emuldata *edp,
     struct wsemul_inputstate *instate)
 {
+	struct vt100base_data *vd = &edp->bd;
+
+#if defined(VT100_SIXEL)
+	if (vd->dcstype == DCSTYPE_SIXEL) {
+		struct sixelinfo *sixel = &edp->sixel;
+ sixel_loop:
+		switch (sixel->decsixel_state) {
+		case DECSIXEL_INIT:
+			switch (c) {
+			case DECSIXEL_REPEAT:
+				sixel->decsixel_state = c;
+				sixel->decsixel_repcount = 0;
+				break;
+			case DECSIXEL_RASTER:
+			case DECSIXEL_COLOR:
+				sixel->decsixel_state = c;
+				vd->nargs = 0;
+				memset(vd->args, 0, sizeof (vd->args));
+				break;
+			case '$': /* SIXEL CR */
+				sixel->decsixel_x = 0;
+				break;
+			case '-': /* SIXEL LF */
+				sixel->decsixel_x = 0;
+				sixel->decsixel_y += 6;
+				if (sixel->decsixel_y + 5 >= sixel->fontheight) {
+					// すくなくとも SIXEL の縦の途中で行を超えるので
+					// 改行してスペースを確保する。
+					wsemul_vt100_nextline(edp);
+					// 行またぎの場合、Left-Top 位置は前の行なので、
+					// とりあえず前の行をカレント行にしてみる
+					vd->crow--;
+				}
+				if (sixel->decsixel_y >= sixel->fontheight) {
+					// 行を完全に跨いだら sixel_y を巻き戻す
+					sixel->decsixel_y -= sixel->fontheight;
+					vd->crow++;
+				}
+				break;
+			default:
+				if (c < ' ') {
+					goto sixel_abort;
+				} else if ('?' <= c && c <='~'
+				 && sixel->decsixel_x < sixel->maxwidth) {
+					(*vd->emulops->putchar)(vd->emulcookie,
+						sixel->decsixel_y << 16 | vd->crow,
+						sixel->decsixel_x << 16 | vd->ccol,
+						c | (1 << 16), sixel->attr);
+					sixel->decsixel_x++;
+				} else {
+					/* ignore */
+				}
+				break;
+			}
+			break;
+		case DECSIXEL_REPEAT:
+			if ('0' <= c && c <= '9') {
+				sixel->decsixel_repcount = sixel->decsixel_repcount * 10
+					+ (c - '0');
+			} else if ('?' <= c && c <= '~') {
+				int cnt;
+				cnt = MIN(sixel->decsixel_repcount,
+					sixel->maxwidth - sixel->decsixel_x);
+				if (cnt > 0)
+					(*vd->emulops->putchar)(vd->emulcookie,
+						sixel->decsixel_y << 16 | vd->crow,
+						sixel->decsixel_x << 16 | vd->ccol,
+						c | (cnt << 16), sixel->attr);
+
+				sixel->decsixel_x += cnt;
+				sixel->decsixel_state = DECSIXEL_INIT;
+			} else {
+				/* invalid ? */
+				sixel->decsixel_state = DECSIXEL_INIT;
+			}
+			break;
+		case DECSIXEL_RASTER:
+			switch (c) {
+			case '0': case '1': case '2': case '3': case '4':
+			case '5': case '6': case '7': case '8': case '9':
+				/* argument digit */
+				if (vd->nargs > VT100_EMUL_NARGS - 1)
+					break;
+				vd->args[vd->nargs] = (vd->args[vd->nargs] * 10)
+					+ (c - '0');
+				break;
+			case ';': /* argument terminator */
+				if (vd->nargs > VT100_EMUL_NARGS) {
+#ifdef VT100_DEBUG
+					printf("vt100: too many arguments\n");
+#endif
+				} else {
+					vd->nargs++;
+				}
+				break;
+			default:
+				if (vd->nargs > 1) {
+					/* TODO: PAN */
+				}
+				if (vd->nargs > 2) {
+					/* TODO: PAD */
+				}
+				if (vd->nargs > 3) {
+					/* TODO: PH */
+				}
+				if (vd->nargs > 4) {
+					/* TODO: PV */
+				}
+				/* c is a next sequence char */
+				sixel->decsixel_state = DECSIXEL_INIT;
+				goto sixel_loop;
+			}
+			break;
+		case DECSIXEL_COLOR:
+			switch (c) {
+			case '0': case '1': case '2': case '3': case '4':
+			case '5': case '6': case '7': case '8': case '9':
+				/* argument digit */
+				if (vd->nargs > VT100_EMUL_NARGS - 1)
+					break;
+				vd->args[vd->nargs] = (vd->args[vd->nargs] * 10)
+					+ (c - '0');
+				break;
+			case ';': /* argument terminator */
+				if (vd->nargs > VT100_EMUL_NARGS) {
+#ifdef VT100_DEBUG
+					printf("vt100: too many arguments\n");
+#endif
+				} else {
+					vd->nargs++;
+				}
+				break;
+			default:
+				sixel->decsixel_color = vd->args[0];
+				/* TODO: Palette definition */
+				/*   ... but maybe ignore */
+				{
+					long tmp;
+					int error;
+					error = (*vd->emulops->allocattr)(vd->emulcookie,
+						sixel->decsixel_color,
+						vd->bgcol,
+						sixel->attrflags,
+						&tmp);
+					if (error == 0) {
+						sixel->attr = tmp;
+					}
+				}
+				sixel->decsixel_state = DECSIXEL_INIT;
+				/* c is a next sequence char */
+				goto sixel_loop;
+			}
+			break;
+		default:
+			goto sixel_abort;
+		}	/* decsixel_state */
+		return VT100_EMUL_STATE_STRING;
+
+ sixel_abort:
+		if (sixel->savedflags) {
+			vd->flags |= sixel->savedflags;
+			sixel->savedflags = 0;
+		}
+		return VT100_EMUL_STATE_NORMAL;
+	}
+#endif	/* VT100_SIXEL */
+
 	if (edp->dcsarg && edp->dcstype && edp->dcspos < DCS_MAXLEN) {
 		if (instate->inchar & ~0xff) {
 #ifdef VT100_PRINTUNKNOWN
@@ -844,6 +1075,20 @@ wsemul_vt100_output_string_esc(struct wsemul_vt100_emuldata *edp,
     struct wsemul_inputstate *instate)
 {
 	if (instate->inchar == '\\') { /* ST complete */
+#if defined(VT100_SIXEL)
+		if (vd->dcstype == DCSTYPE_SIXEL) {
+			struct sixelinfo *sixel = &edp->sixel;
+			if (sixel->decsixel_x != 0 || sixel->decsixel_y != 0) {
+				// XXX あったほうがいいのかなと。
+				wsemul_vt100_nextline(edp);
+			}
+			if (sixel->savedflags) {
+				vd->flags |= sixel->savedflags;
+				sixel->savedflags = 0;
+			}
+			vd->dcstype = 0;
+		}
+#endif
 		wsemul_vt100_handle_dcs(edp);
 		edp->state = VT100_EMUL_STATE_NORMAL;
 	} else
@@ -876,6 +1121,47 @@ wsemul_vt100_output_dcs(struct wsemul_vt100_emuldata *edp,
 			edp->nargs++;
 		newstate = VT100_EMUL_STATE_STRING;
 		switch (instate->inchar) {
+#if defined(VT100_SIXEL)
+		case 'q':
+			{
+				/*
+				 * DCS <P1> ; <P2> ; <P3> q
+				 * P1 is aspect ratio, XXX not supported.
+				 * P2 is bgcolor mode.
+				 *  0..2: bgcolor mode, XXX not supported here.
+				 *  bit2 means 'OR'ed color mode. it's original extension.
+				 */
+				struct sixelinfo *sixel = &edp->sixel;
+
+				sixel->attrflags = vd->attrflags | WSATTR_SIXEL
+					| (((vd->args[1] >> 2) & 1) << 17) /* OR-mode */;
+
+				long tmp;
+				int error;
+				error = (*vd->emulops->allocattr)(vd->emulcookie,
+					vd->fgcol,
+					vd->bgcol,
+					sixel->attrflags,
+					&tmp);
+				if (error == 0) {
+					sixel->attr = tmp;
+				}
+
+				sixel->decsixel_state = DECSIXEL_INIT;
+				sixel->decsixel_x = 0;
+				sixel->decsixel_y = 0;
+				sixel->maxwidth = sixel->fontwidth * (vd->ncols - vd->ccol);
+
+				vd->dcstype = DCSTYPE_SIXEL;
+				if (sixel->savedflags == 0) {
+					sixel->savedflags = vd->flags & VTFL_CURSORON;
+					vd->flags &= ~VTFL_CURSORON;
+					(*vd->emulops->cursor)(vd->emulcookie, 0,
+						vd->crow, vd->ccol << vd->dw);
+				}
+			}
+			break;
+#endif
 		case '$':
 			newstate = VT100_EMUL_STATE_DCS_DOLLAR;
 			break;

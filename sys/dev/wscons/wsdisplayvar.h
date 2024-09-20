@@ -99,6 +99,10 @@ struct wsdisplay_emulops {
 #define WSATTR_BLINK	4
 #define WSATTR_UNDERLINE 8
 #define WSATTR_WSCOLORS 16
+#if defined(VT100_SIXEL)
+/* WSATTR_SIXEL also means sixel repeat count */
+#define WSATTR_SIXEL	(1 << 16)
+#endif
 };
 
 #define	WSSCREEN_NAME_SIZE	16
