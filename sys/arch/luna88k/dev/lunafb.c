@@ -298,6 +298,14 @@ omfbmmap(void *v, off_t offset, int prot)
 	struct om_hwdevconfig *dc = sc->sc_dc;
 	paddr_t cookie = -1;
 
+#if 1
+	if (offset >= 0xB1000000) {
+		offset -= 0xB1000000;
+		cookie = (paddr_t)(trunc_page(BMAP_START) + offset);
+		return cookie;
+	}
+#endif
+
 	if ((offset & PAGE_MASK) != 0)
 		return (-1);
 
