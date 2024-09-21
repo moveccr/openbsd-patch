@@ -67,6 +67,17 @@ luna88k_board_table[] = {
 #if 0
 	{ MROM_ADDR,		MROM_SPACE,		R,	CI },
 #endif
+#define PMAP_USE_ALL_BMAP
+#if defined(PMAP_USE_ALL_BMAP)
+	{ BMAP_RFCNT,		PAGE_SIZE,		RW,	CI },
+	{ BMAP_BMSEL,		PAGE_SIZE,		RW,	CI, TRUE },
+	{ BMAP_BMP,		BMAP_BMAP0 - BMAP_BMP,	RW,	CI, TRUE },
+	{ BMAP_BMAP0,		BMAP_FN - BMAP_BMAP0,	RW,	CI, },
+	{ BMAP_FN,		BMAP_FN0 - BMAP_FN,	RW,	CI, TRUE },
+	{ BMAP_FN0,		BMAP_END - BMAP_FN0,	RW,	CI },
+	{ BMAP_PALLET0,		PAGE_SIZE,		RW,	CI },
+	{ BMAP_PALLET1,		PAGE_SIZE,		RW,	CI },
+#else /* PMAP_USE_ALL_BMAP */
 	{ BMAP_RFCNT,		PAGE_SIZE,		RW,	CI },
 	{ BMAP_BMSEL,		PAGE_SIZE,		RW,	CI },
 	{ BMAP_BMP,		BMAP_BMAP0 - BMAP_BMP,	RW,	CI, TRUE },
@@ -91,6 +102,7 @@ luna88k_board_table[] = {
 	{ BMAP_PALLET0,		PAGE_SIZE,		RW,	CI },
 	{ BMAP_PALLET1,		PAGE_SIZE,		RW,	CI },
 #endif
+#endif	/* PMAP_USE_ALL_BMAP */
 	{ BMAP_PALLET2,		PAGE_SIZE,		RW,	CI },
 #if 0
 	{ BOARD_CHECK_REG,	PAGE_SIZE,		RW,	CI },
